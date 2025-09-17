@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Chat App",
+  "description": "An interactive chat application powered by the Gemini API.",
+  "requestFramePermissions": []
+}
