@@ -283,7 +283,7 @@ body {
   display: flex;
   align-items: center;
 }
-.message p:first-child, .message pre:first-child {
+.message p:first-child, .message pre:first-child, .message .file-card:first-child {
   margin-top: 0;
 }
 .message p:last-child, .message pre:last-child {
@@ -298,6 +298,36 @@ body {
 }
 .message code {
     font-family: 'Courier New', Courier, monospace;
+}
+
+/* File Card styles in chat history */
+.file-card {
+    background-color: var(--input-background);
+    border: 1px solid var(--input-border-color);
+    border-radius: 8px;
+    padding: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    max-width: 100%;
+    margin-bottom: 0.5rem;
+}
+.file-card-icon {
+    flex-shrink: 0;
+    color: var(--button-color);
+}
+.file-card-info {
+    overflow: hidden;
+    white-space: nowrap;
+}
+.file-card-name {
+    font-weight: 500;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+.file-card-size {
+    font-size: 0.8rem;
+    color: var(--button-color);
 }
 
 
@@ -380,18 +410,23 @@ body {
   width: 100%;
   max-width: 768px;
 }
-#image-preview-container {
+#file-preview-container {
     position: relative;
     margin-bottom: 0.5rem;
     width: fit-content;
+    max-width: 100%;
 }
-#image-preview {
+#file-preview-container .file-card {
+    margin-bottom: 0;
+}
+#file-preview-container img {
     max-height: 100px;
     max-width: 100px;
     border-radius: 8px;
     border: 1px solid var(--input-border-color);
+    display: block;
 }
-#remove-image-button {
+#remove-file-button {
     position: absolute;
     top: -8px;
     right: -8px;
@@ -409,6 +444,7 @@ body {
     align-items: center;
     justify-content: center;
 }
+
 .input-wrapper {
   position: relative;
   display: flex;

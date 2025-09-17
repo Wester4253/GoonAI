@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI, Chat } from '@google/genai';
+import { GoogleGenAI, Chat, Part } from '@google/genai';
 import { marked } from 'marked';
 
 // --- DOM Element Selection ---
@@ -43,9 +43,7 @@ const settingsCancelButton = document.getElementById('settings-cancel-button') a
 // File Upload
 const attachFileButton = document.getElementById('attach-file-button') as HTMLButtonElement;
 const fileInput = document.getElementById('file-input') as HTMLInputElement;
-const imagePreviewContainer = document.getElementById('image-preview-container') as HTMLDivElement;
-const imagePreview = document.getElementById('image-preview') as HTMLImageElement;
-const removeImageButton = document.getElementById('remove-image-button') as HTMLButtonElement;
+const filePreviewContainer = document.getElementById('file-preview-container') as HTMLDivElement;
 
 
 // --- Gemini API Initialization ---
@@ -56,10 +54,21 @@ let chat: Chat;
 let isGenerating = false;
 let currentUser: string | null = null;
 let isLoginMode = true;
-let attachedFile: { mimeType: string; data: string; } | null = null;
+let attachedFile: {
+    name: string;
+    size: number;
+    mimeType: string;
+    data: string; // base64 data
+    content?: string; // text content for text files
+    isImage: boolean;
+} | null = null;
 
-type ChatMessagePart = { text: string } | { inlineData: { mimeType: string; data: string } };
-type ChatMessage = { role: 'user' | 'model'; parts: ChatMessagePart[] };
+type ChatMessagePart = Part;
+type ChatMessage = { 
+    role: 'user' | 'model'; 
+    parts: ChatMessagePart[];
+    file?: { name: string; mimeType: string; size: number };
+};
 let chatHistoryLog: ChatMessage[] = [];
 
 // --- Constants and SVGs ---
@@ -68,7 +77,7 @@ const MODEL_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" 
 const COPY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
 const COPIED_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
 const SPEAKER_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
-
+const FILE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
 
 /**
  * Creates the message structure with an avatar and content.
@@ -91,6 +100,15 @@ function createMessageElement(sender: 'user' | 'model'): [HTMLElement, HTMLEleme
     return [wrapper, messageContent];
 }
 
+function formatFileSize(bytes: number, decimals = 2): string {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
 /**
  * Appends a message to the chat history.
  */
@@ -100,7 +118,7 @@ async function displayMessage(
 ): Promise<HTMLElement> {
     const isNew = !element;
     let messageElement = element;
-    const { role, parts } = message;
+    const { role, parts, file } = message;
 
     if (isNew) {
         const [, content] = createMessageElement(role);
@@ -124,10 +142,22 @@ async function displayMessage(
     }
     messageElement.classList.remove('thinking');
     
-    // Combine text parts and handle image parts
+    // Combine text parts and handle image/file parts
     let fullText = '';
     let htmlContent = '';
     
+    if (file) {
+        htmlContent += `
+            <div class="file-card">
+                <div class="file-card-icon">${FILE_ICON}</div>
+                <div class="file-card-info">
+                    <div class="file-card-name">${file.name}</div>
+                    <div class="file-card-size">${formatFileSize(file.size)}</div>
+                </div>
+            </div>
+        `;
+    }
+
     for(const part of parts) {
         if ('text' in part) {
             fullText += part.text;
@@ -139,7 +169,10 @@ async function displayMessage(
 
     const rawMessage = fullText.replace(/▍$/, '');
     messageElement.dataset.rawMessage = rawMessage;
-    htmlContent += await marked.parse(rawMessage, { async: true, gfm: true });
+    // Only parse and add markdown if there's text content
+    if (rawMessage.trim()) {
+        htmlContent += await marked.parse(rawMessage, { async: true, gfm: true });
+    }
     messageElement.innerHTML = htmlContent;
 
     // Add actions (copy, speak) for model messages
@@ -245,22 +278,50 @@ function setFormState(isGenerating: boolean) {
  */
 async function handleChatSubmit(e?: Event) {
     e?.preventDefault();
-    const messageText = chatInput.value.trim();
-    if (!messageText && !attachedFile) return;
+    const userPromptText = chatInput.value.trim();
+    if (!userPromptText && !attachedFile) return;
 
     isGenerating = true;
     setFormState(true);
-    window.speechSynthesis.cancel(); // Stop any ongoing speech
+    window.speechSynthesis.cancel();
 
-    const userMessageParts: ChatMessagePart[] = [];
+    // 1. Prepare parts for the model API call
+    const modelParts: ChatMessagePart[] = [];
+    let modelPromptText = userPromptText;
+
     if (attachedFile) {
-        userMessageParts.push({ inlineData: attachedFile });
+        if (attachedFile.isImage) {
+            modelParts.push({ inlineData: { mimeType: attachedFile.mimeType, data: attachedFile.data } });
+        } else if (attachedFile.content) {
+            const filePrompt = `The content of the file "${attachedFile.name}" is:\n\n\`\`\`\n${attachedFile.content}\n\`\`\`\n\n`;
+            modelPromptText = filePrompt + modelPromptText;
+        }
     }
-    if (messageText) {
-        userMessageParts.push({ text: messageText });
+    if (modelPromptText) {
+        modelParts.push({ text: modelPromptText });
     }
 
-    const userMessage: ChatMessage = { role: 'user', parts: userMessageParts };
+    // Don't send if there's nothing to send (e.g., a non-text file without a prompt)
+    if (modelParts.length === 0) {
+        isGenerating = false;
+        setFormState(false);
+        return;
+    }
+    
+    // 2. Prepare the message object for display and local history
+    const userMessage: ChatMessage = { role: 'user', parts: [] };
+    if (attachedFile) {
+        if (attachedFile.isImage) {
+            userMessage.parts.push({ inlineData: { mimeType: attachedFile.mimeType, data: attachedFile.data } });
+        } else {
+            userMessage.file = { name: attachedFile.name, mimeType: attachedFile.mimeType, size: attachedFile.size };
+        }
+    }
+    if (userPromptText) {
+        userMessage.parts.push({ text: userPromptText });
+    }
+
+    // 3. Update UI and send message
     chatHistoryLog.push(userMessage);
     saveChatHistory();
     await displayMessage(userMessage);
@@ -273,8 +334,10 @@ async function handleChatSubmit(e?: Event) {
     const modelMessageElement = await displayMessage({role: 'model', parts: [{text: ''}]});
 
     try {
-        // FIX: The `sendMessageStream` method expects a `message` property, not `parts`.
-        const responseStream = await chat.sendMessageStream({ message: userMessageParts });
+        if (!chat) {
+            throw new Error("Chat session is not initialized. Please try again.");
+        }
+        const responseStream = await chat.sendMessageStream({ message: modelParts });
         let fullResponse = '';
         for await (const chunk of responseStream) {
             if (!isGenerating) break;
@@ -286,7 +349,8 @@ async function handleChatSubmit(e?: Event) {
         saveChatHistory();
     } catch (error) {
         console.error('Error during chat:', error);
-        await displayMessage({ role: 'model', parts: [{text: 'An error occurred. Please try again.'}] }, modelMessageElement);
+        const errorMessage = error instanceof Error ? error.message : 'An error occurred. Please try again.';
+        await displayMessage({ role: 'model', parts: [{text: errorMessage}] }, modelMessageElement);
     } finally {
         isGenerating = false;
         setFormState(false);
@@ -316,24 +380,100 @@ function setupFileUpload() {
     attachFileButton.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (event) => {
         const file = (event.target as HTMLInputElement).files?.[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const base64Data = (e.target?.result as string).split(',')[1];
-                attachedFile = { mimeType: file.type, data: base64Data };
-                imagePreview.src = e.target?.result as string;
-                imagePreviewContainer.classList.remove('hidden');
+        if (!file) return;
+        
+        removeAttachedFile(); // Clear any previous file
+
+        const isImage = file.type.startsWith('image/');
+        const isText = file.type.startsWith('text/') || /\.(js|py|json|html|css|md|ts|tsx|jsx)$/.test(file.name);
+
+        const reader = new FileReader();
+        
+        reader.onload = (e) => {
+            const result = e.target?.result as string;
+            
+            let base64Data = '';
+            let textContent: string | undefined = undefined;
+            let previewUrl = '';
+
+            if (isImage) {
+                previewUrl = result;
+                base64Data = result.split(',')[1];
+            } else if (isText) {
+                textContent = result;
+            }
+
+            attachedFile = { 
+                name: file.name,
+                size: file.size,
+                mimeType: file.type, 
+                data: base64Data,
+                content: textContent,
+                isImage,
             };
+
+            // Create preview
+            let previewHtml = '';
+            if (isImage) {
+                previewHtml = `<img src="${previewUrl}" alt="Image preview" />`;
+            } else {
+                previewHtml = `
+                    <div class="file-card">
+                        <div class="file-card-icon">${FILE_ICON}</div>
+                        <div class="file-card-info">
+                            <div class="file-card-name">${file.name}</div>
+                            <div class="file-card-size">${formatFileSize(file.size)}</div>
+                        </div>
+                    </div>`;
+            }
+            filePreviewContainer.innerHTML = previewHtml + `<button type="button" id="remove-file-button" aria-label="Remove file">&times;</button>`;
+            filePreviewContainer.classList.remove('hidden');
+        };
+
+        reader.onerror = (err) => {
+            console.error("File reading error:", err);
+            removeAttachedFile();
+        }
+
+        if (isImage) {
             reader.readAsDataURL(file);
+        } else if (isText) {
+            reader.readAsText(file);
+        } else {
+             // For other non-readable files, just show the card, don't read content
+             attachedFile = { 
+                name: file.name,
+                size: file.size,
+                mimeType: file.type, 
+                data: '',
+                content: undefined,
+                isImage: false,
+            };
+            const previewHtml = `
+                    <div class="file-card">
+                        <div class="file-card-icon">${FILE_ICON}</div>
+                        <div class="file-card-info">
+                            <div class="file-card-name">${file.name}</div>
+                            <div class="file-card-size">${formatFileSize(file.size)}</div>
+                        </div>
+                    </div>`;
+            filePreviewContainer.innerHTML = previewHtml + `<button type="button" id="remove-file-button" aria-label="Remove file">&times;</button>`;
+            filePreviewContainer.classList.remove('hidden');
         }
     });
-    removeImageButton.addEventListener('click', removeAttachedFile);
+    
+    filePreviewContainer.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('#remove-file-button')) {
+            removeAttachedFile();
+        }
+    });
 }
 
 function removeAttachedFile() {
     attachedFile = null;
     fileInput.value = ''; // Reset file input
-    imagePreviewContainer.classList.add('hidden');
+    filePreviewContainer.classList.add('hidden');
+    filePreviewContainer.innerHTML = '';
 }
 
 
@@ -440,19 +580,26 @@ function handleAuthSubmit(e: Event) {
         return;
     }
 
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    let users = {};
+    try {
+        users = JSON.parse(localStorage.getItem('users') || '{}');
+    } catch (err) {
+        console.error("Could not parse users from localStorage", err);
+        // If users are corrupted, default to an empty object, allowing signup.
+        users = {};
+    }
 
     if (isLoginMode) {
-        if (users[username] && users[username].password === password) {
+        if ((users as any)[username] && (users as any)[username].password === password) {
             startUserSession(username);
         } else {
             showAuthError("Invalid username or password.");
         }
     } else { // Sign up mode
-        if (users[username]) {
+        if ((users as any)[username]) {
             showAuthError("Username already exists.");
         } else {
-            users[username] = { password, systemInstruction: '' };
+            (users as any)[username] = { password, systemInstruction: '' };
             localStorage.setItem('users', JSON.stringify(users));
             startUserSession(username);
         }
@@ -473,28 +620,59 @@ function handleLogout() {
 function loadChatHistory() {
     const savedHistory = localStorage.getItem(`chatHistory_${currentUser}`);
     chatHistory.innerHTML = '';
+    const historyForModel: ChatMessage[] = [];
+    
+    chatHistoryLog = []; // Reset history log first
 
     if (savedHistory) {
-        chatHistoryLog = JSON.parse(savedHistory);
-        if (chatHistoryLog.length > 0) {
-            welcomeScreen.classList.add('hidden');
-            chatHistoryLog.forEach(msg => {
-                displayMessage(msg);
-            });
-        } else {
-             welcomeScreen.classList.remove('hidden');
+        try {
+            // Try to parse and assign
+            chatHistoryLog = JSON.parse(savedHistory);
+        } catch (e) {
+            console.error("Failed to parse chat history from localStorage. Clearing history.", e);
+            localStorage.removeItem(`chatHistory_${currentUser}`); // Remove corrupted entry
         }
+    }
+    
+    if (chatHistoryLog.length > 0) {
+        welcomeScreen.classList.add('hidden');
+        chatHistoryLog.forEach(msg => {
+            displayMessage(msg);
+            // Reconstruct history for the model, converting file info back to prompts
+            const modelMessage: ChatMessage = { role: msg.role, parts: [] };
+            let messageText = '';
+            if(msg.file) {
+                 // NOTE: This loses file content on reload. A more robust solution
+                 // would require a different storage strategy for large files.
+                 messageText += `The user attached the file "${msg.file.name}".\n\n`;
+            }
+            for(const part of msg.parts){
+                if('text' in part){
+                    messageText += part.text;
+                } else {
+                    modelMessage.parts.push(part);
+                }
+            }
+            if(messageText) modelMessage.parts.push({text: messageText});
+
+            historyForModel.push(modelMessage);
+        });
     } else {
-        chatHistoryLog = [];
-        welcomeScreen.classList.remove('hidden');
+         welcomeScreen.classList.remove('hidden');
     }
 
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    let users: any = {};
+    try {
+        users = JSON.parse(localStorage.getItem('users') || '{}');
+    } catch(e) {
+        console.error("Failed to parse users from localStorage. Using default.", e);
+        users = {}; // Default to empty if corrupt, so app doesn't crash.
+    }
     const systemInstruction = users[currentUser!]?.systemInstruction || '';
     
     chat = ai.chats.create({ 
         model: 'gemini-2.5-flash', 
-        history: chatHistoryLog,
+        history: historyForModel,
         config: {
             ...(systemInstruction && { systemInstruction })
         }
@@ -518,7 +696,12 @@ function handleClearChat() {
 // --- Settings Management ---
 
 function openSettingsModal() {
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    let users: any = {};
+    try {
+        users = JSON.parse(localStorage.getItem('users') || '{}');
+    } catch(e) {
+        console.error("Failed to parse users from localStorage for settings.", e);
+    }
     systemInstructionInput.value = users[currentUser!]?.systemInstruction || '';
     settingsModal.classList.remove('hidden');
 }
@@ -530,7 +713,13 @@ function closeSettingsModal() {
 function handleSaveSettings(e: Event) {
     e.preventDefault();
     const newInstruction = systemInstructionInput.value.trim();
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    let users: any = {};
+    try {
+        users = JSON.parse(localStorage.getItem('users') || '{}');
+    } catch (e) {
+        console.error("Failed to parse users from localStorage for saving settings.", e);
+        // If it's corrupt, we might not be able to save. Let's proceed and it will likely overwrite.
+    }
     if (users[currentUser!]) {
         users[currentUser!].systemInstruction = newInstruction;
         localStorage.setItem('users', JSON.stringify(users));
